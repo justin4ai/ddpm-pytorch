@@ -1,0 +1,6 @@
+.vscode
+__pycache__
+my.py 
+tmp.py
+results/
+mnist_data/
