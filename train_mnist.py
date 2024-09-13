@@ -11,6 +11,7 @@ from utils import ExponentialMovingAverage
 import os
 import math
 import argparse
+from omegaconf import OmegaConf
 
 def create_mnist_dataloaders(batch_size,image_size=28,num_workers=0):
     
@@ -29,56 +30,57 @@ def create_mnist_dataloaders(batch_size,image_size=28,num_workers=0):
 
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Training DiffusionModel")
-    parser.add_argument('--lr',type = float ,default=0.001)
-    parser.add_argument('--batch_size',type = int ,default=128)    
-    parser.add_argument('--epochs',type = int,default=100)
-    parser.add_argument('--ckpt',type = str,help = 'define checkpoint path',default='')
-    parser.add_argument('--n_samples',type = int,help = 'define sampling amounts after every epoch trained',default=36)
-    parser.add_argument('--model_base_dim',type = int,help = 'base dim of Unet',default=64)
-    parser.add_argument('--timesteps',type = int,help = 'sampling steps of DDPM',default=1000)
-    parser.add_argument('--model_ema_steps',type = int,help = 'ema model evaluation interval',default=10)
-    parser.add_argument('--model_ema_decay',type = float,help = 'ema model decay',default=0.995)
-    parser.add_argument('--log_freq',type = int,help = 'training log message printing frequence',default=10)
-    parser.add_argument('--no_clip',action='store_true',help = 'set to normal sampling method without clip x_0 which could yield unstable samples')
-    parser.add_argument('--cpu',action='store_true',help = 'cpu training')
+# def parse_args():
+#     parser = argparse.ArgumentParser(description="Training DiffusionModel")
+#     parser.add_argument('--lr',type = float ,default=0.001)
+#     parser.add_argument('--batch_size',type = int ,default=128)    
+#     parser.add_argument('--epochs',type = int,default=100)
+#     parser.add_argument('--ckpt',type = str,help = 'define checkpoint path',default='')
+#     parser.add_argument('--n_samples',type = int,help = 'define sampling amounts after every epoch trained',default=36)
+#     parser.add_argument('--model_base_dim',type = int,help = 'base dim of Unet',default=64)
+#     parser.add_argument('--timesteps',type = int,help = 'sampling steps of DDPM',default=1000)
+#     parser.add_argument('--model_ema_steps',type = int,help = 'ema model evaluation interval',default=10)
+#     parser.add_argument('--model_ema_decay',type = float,help = 'ema model decay',default=0.995)
+#     parser.add_argument('--log_freq',type = int,help = 'training log message printing frequence',default=10)
+#     parser.add_argument('--no_clip',action='store_true',help = 'set to normal sampling method without clip x_0 which could yield unstable samples')
+#     parser.add_argument('--cpu',action='store_true',help = 'cpu training')
 
-    args = parser.parse_args()
+#     args = parser.parse_args()
 
-    return args
+#     return args
 
 
-def main(args):
+def main(conf):
 
-    device = "cpu" if args.cpu else "cuda"
+    #device = "cpu" if args.cpu else "cuda"
+    device = conf.cpu
 
-    train_dataloader,test_dataloader = create_mnist_dataloaders(batch_size = args.batch_size, image_size = 28)
-    model = DiffusionModel(timesteps = args.timesteps, # sampling steps of DDPM
+    train_dataloader,test_dataloader = create_mnist_dataloaders(batch_size = conf.data.train_bs, image_size = 28)
+    model = DiffusionModel(timesteps = conf.model.timesteps, # sampling steps of DDPM
                 image_size = 28,
                 in_channels = 1, # input channel size
-                base_dim = args.model_base_dim, #? 
+                base_dim = conf.model.base_dim, #? 
                 dim_mults=[2,4])
     model = model.to(device)
 
     # EMA setting 
-    adjust = 1 * args.batch_size * args.model_ema_steps / args.epochs
-    alpha = 1.0 - args.model_ema_decay
+    adjust = 1 * conf.data.train_bs * conf.model.ema_steps / conf.model.epochs
+    alpha = 1.0 - conf.model.ema_decay
     alpha = min(1.0, alpha * adjust)
     model_ema = ExponentialMovingAverage(model, device=device, decay=1.0 - alpha)
 
-    optimizer = AdamW(model.parameters(),lr=args.lr) # adam for weight decay
-    scheduler = OneCycleLR(optimizer, args.lr, total_steps = args.epochs * len(train_dataloader), pct_start = 0.25, anneal_strategy = 'cos') # from initial lr, 1 cycle annealing
+    optimizer = AdamW(model.parameters(),lr=conf.model.lr) # adam for weight decay
+    scheduler = OneCycleLR(optimizer, conf.model.lr, total_steps = conf.model.epochs * len(train_dataloader), pct_start = 0.25, anneal_strategy = 'cos') # from initial lr, 1 cycle annealing
     loss_fn = nn.MSELoss(reduction='mean') # L2
 
     # load checkpoint
-    if args.ckpt:
-        ckpt=torch.load(args.ckpt)
+    if conf.ckpt:
+        ckpt=torch.load(conf.ckpt)
         model_ema.load_state_dict(ckpt["model_ema"])
         model.load_state_dict(ckpt["model"])
 
     global_steps = 0
-    for i in range(args.epochs): # #(epoch)
+    for i in range(conf.model.epochs): # #(epoch)
         model.train() # train mode
 
         # 🚨 not LDM - input (resized) image itself
@@ -95,13 +97,13 @@ def main(args):
 
             scheduler.step()
 
-            if global_steps % args.model_ema_steps==0:
+            if global_steps % conf.model.ema_steps==0:
                 model_ema.update_parameters(model)
             global_steps +=1
 
-            if j % args.log_freq==0:
+            if j % conf.log_freq==0:
          
-                print("Epoch[{}/{}],Step[{}/{}],loss:{:.5f},lr:{:.5f}".format(i+1,args.epochs,j,len(train_dataloader),
+                print("Epoch[{}/{}],Step[{}/{}],loss:{:.5f},lr:{:.5f}".format(i+1,conf.model.epochs,j,len(train_dataloader),
                                                                     loss.detach().cpu().item(),scheduler.get_last_lr()[0]))
         ckpt={"model":model.state_dict(),
                 "model_ema":model_ema.state_dict()}
@@ -110,9 +112,10 @@ def main(args):
         torch.save(ckpt,"results/steps_{:0>8}.pt".format(global_steps))
 
         model_ema.eval()
-        samples = model_ema.module.sampling(args.n_samples, clipped_reverse_diffusion = not args.no_clip, device = device)
-        save_image(samples,"results/steps_{:0>8}.png".format(global_steps),nrow=int(math.sqrt(args.n_samples)))
+        samples = model_ema.module.sampling(conf.data.n_samples, clipped_reverse_diffusion = not conf.no_clip, device = device)
+        save_image(samples,"results/steps_{:0>8}.png".format(global_steps),nrow=int(math.sqrt(conf.data.n_samples)))
 
 if __name__=="__main__":
-    args=parse_args()
-    main(args)
+    # args=parse_args()
+    conf = OmegaConf.load("./configs/train.yaml")
+    main(conf)
